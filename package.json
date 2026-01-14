@@ -1,0 +1,17 @@
+{
+  "name": "openi-ai-agent",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@openai/agents": "^0.0.10",
+    "dotenv": "^16.4.5"
+  }
+}
