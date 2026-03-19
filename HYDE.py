@@ -1,0 +1,186 @@
+from pathlib import Path
+from collections import defaultdict
+
+from dotenv import load_dotenv
+
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_qdrant import QdrantVectorStore
+
+load_dotenv()
+
+pdf_path = Path(__file__).parent / "nodejs.pdf"
+loader = PyPDFLoader(str(pdf_path))
+docs = loader.load()
+
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=1000,
+    chunk_overlap=200,
+)
+split_docs = text_splitter.split_documents(docs)
+
+embeddings = OpenAIEmbeddings(
+    model="text-embedding-3-large",
+)
+
+vectorstore = QdrantVectorStore.from_existing_collection(
+    url="http://localhost:6333/",
+    collection_name="learning_langchain",
+    embedding=embeddings,
+)
+
+hyde_llm = ChatOpenAI(
+    model="gpt-4o-mini",
+    temperature=0,
+)
+
+answer_llm = ChatOpenAI(
+    model="gpt-4o",
+    temperature=0,
+)
+
+
+def generate_hypothetical_doc(query: str) -> str:
+    system_prompt = (
+        "You are a helpful Node.js expert.\n"
+        "Given a user question, write a concise paragraph that could be a good "
+        "answer based on Node.js documentation.\n"
+        "Do NOT say you are unsure; just write a likely answer.\n"
+    )
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": query},
+    ]
+    resp = hyde_llm.invoke(messages)
+    return resp.content.strip()
+
+
+def generate_hypothetical_docs(query: str, n_docs: int = 3) -> list[str]:
+    system_prompt = (
+        "You are a helpful Node.js expert.\n"
+        f"Given a user question, write {n_docs} different short paragraphs that\n"
+        "could each be valid answers based on the Node.js docs.\n"
+        "Return them as a numbered list, one paragraph per line."
+    )
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": query},
+    ]
+    resp = hyde_llm.invoke(messages)
+    lines = resp.content.splitlines()
+
+    docs = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line[0].isdigit():
+            parts = line.split(maxsplit=1)
+            if len(parts) == 2:
+                line = parts[1]
+        docs.append(line)
+
+    if not docs:
+        docs = [generate_hypothetical_doc(query)]
+
+    return docs[:n_docs]
+
+
+def reciprocal_rank_fusion(result_lists, k: float = 60.0):
+    fused_scores = defaultdict(float)
+    doc_by_key = {}
+
+    for results in result_lists:
+        for rank, (doc, _score) in enumerate(results, start=1):
+            key = (
+                str(doc.metadata.get("id"))
+                or f"{doc.metadata.get('source', '')}-{doc.metadata.get('page', '')}-{hash(doc.page_content)}"
+            )
+            fused_scores[key] += 1.0 / (k + rank)
+            if key not in doc_by_key:
+                doc_by_key[key] = doc
+
+    sorted_items = sorted(fused_scores.items(), key=lambda x: x[1], reverse=True)
+    return [(doc_by_key[key], score) for key, score in sorted_items]
+
+
+user_query = "What is the FS Module?"
+
+hypothetical_docs = generate_hypothetical_docs(user_query, n_docs=3)
+
+top_k_per_view = 5
+result_lists = []
+
+for hyp in hypothetical_docs:
+    hyp_embedding = embeddings.embed_query(hyp)
+    results = vectorstore.similarity_search_by_vector(
+        hyp_embedding,
+        k=top_k_per_view,
+    )
+    results_with_scores = [(doc, 0.0) for doc in results]
+    result_lists.append(results_with_scores)
+
+raw_results = vectorstore.similarity_search_with_score(
+    user_query,
+    k=top_k_per_view,
+)
+result_lists.append(raw_results)
+
+fused_results = reciprocal_rank_fusion(result_lists, k=60.0)
+
+final_k = 6
+top_docs = [doc for doc, _ in fused_results[:final_k]]
+
+context = "\n\n---\n\n".join(doc.page_content for doc in top_docs)
+
+SYSTEM_PROMPT = """You are NodeBot, an expert Node.js documentation assistant. Your job is to answer developer questions accurately and helpfully using ONLY the context extracted from the official Node.js documentation PDF provided to you.
+
+Behavior Rules
+
+1. Strict grounding — Base every answer exclusively on the provided context. Do not use outside knowledge or assumptions.
+2. Honest about gaps — If the context does not contain enough information to answer, respond with:
+   "The provided documentation doesn't cover this. Try checking nodejs.org/en/docs for more details."
+3. No hallucination — Never fabricate API signatures, method names, parameters, or behaviors.
+4. Stay on topic — Only answer questions related to Node.js. Politely decline unrelated questions.
+
+Response Format
+
+Start with a **one-sentence direct answer** to the question.
+Follow with a structured explanation using bullet points or numbered steps where appropriate.
+Include **code examples** whenever they aid understanding. Use proper ```javascript ``` blocks.
+For API-related questions, mention: purpose, syntax, parameters, return value, and a usage example.
+Keep responses concise but complete. Avoid unnecessary filler.
+
+Tone
+
+- Professional yet approachable — like a senior Node.js developer mentoring a junior.
+- Use plain English. Avoid jargon unless the user clearly understands it.
+
+---
+
+Context from Documentation
+
+{context}
+
+---
+
+Remember: If the answer isn't in the context above, say so honestly. Do not guess.
+"""
+
+messages = [
+    {
+        "role": "system",
+        "content": SYSTEM_PROMPT.format(context=context),
+    },
+    {
+        "role": "user",
+        "content": user_query,
+    },
+]
+
+response = answer_llm.invoke(messages)
+
+print("Query              :", user_query)
+print("HyDE docs (sample) :", hypothetical_docs[0][:120], "...")
+print("Answer             :", response.content)
