@@ -1,6 +1,22 @@
 from typing import TypedDict, Literal
 from langgraph.graph import StateGraph, START, END
+from dotenv import load_dotenv
+from langsmith.wrappers import wrap_openai
+from openai import OpenAI
+client = wrap_openai(OpenAI)
+from pydantic import BaseModel
 
+load_dotenv()
+
+#Schema
+class DetectCallResponse(BaseModel):
+    is_question_ai: bool
+
+class CodingAiResponse(BaseModel):
+    answer: str
+
+class SimpleAiResponse(BaseModel):
+    answer: str
 
 class State(TypedDict):
     user_message: str
@@ -9,17 +25,58 @@ class State(TypedDict):
 
 def detect_query(state: State):
     user_message = state.get("user_message")
-    state["is_coding_question"] = True
+    SYSTEM_PROMPT = """
+    You are an ai assistant you are job is to find out that the user query is related to coding question or not
+    Return the response in specified JSON boolean only.
+    """
+    result = client.beta.chat.completions.create(
+        model="gpt-4o-mini",
+        response_format=DetectCallResponse,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_message }
+        ]
+    )
+    state["is_coding_question"] = result.choices[0].message.parsed.is_question_ai
     return state
 
 def solve_coding_question(state: State):
     user_message = state.get("user_message")
-    state["ai_message"]="Here is your coding question answer"
+
+    SYSTEM_PROMPT = """
+    You are an ai assistant you are job is to resolve the user query based on coding
+    he is facing
+    """
+    result = client.beta.chat.completions.create(
+        model="gpt-4.1",
+        response_format=CodingAiResponse,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_message }
+        ]
+    )
+
+
+    state["ai_message"]= result.choices[0].message.parsed.answer
     return state
 
 def solve_simple_question(state: State):
     user_message = state.get("user_message")
-    state["ai_message"]="Here is your coding question answer"
+    SYSTEM_PROMPT = """
+    You are an ai assistant you are job is to resolve the user query based on simple question
+    he is facing
+    """
+    result = client.beta.chat.completions.create(
+        model="gpt-4o-mini",
+        response_format=SimpleAiResponse,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_message }
+        ]
+    )
+
+    state["ai_message"]=result.choices[0].message.parsed.answer
+
     return state
 
 def add_route(state: State):
