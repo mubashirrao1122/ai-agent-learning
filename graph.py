@@ -12,10 +12,10 @@ def detect_query(state: State):
 
 def solve_coding_question(state: state):
     user_message = state.get("user_message")
-    stat.ai_message="Here is your coding question answer"
+    state.ai_message="Here is your coding question answer"
     return state
 
 def solve_simple_question(state: state):
     user_message = state.get("user_message")
-    stat.ai_message="Here is your coding question answer"
+    state.ai_message="Here is your coding question answer"
     return state
